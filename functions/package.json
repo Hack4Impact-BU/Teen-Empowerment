@@ -1,0 +1,21 @@
+{
+  "name": "te-sms-functions",
+  "version": "1.0.0",
+  "description": "Firebase Cloud Functions for Teen Empowerment SMS Dashboard",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": "18"
+  },
+  "scripts": {
+    "serve": "firebase emulators:start --only functions",
+    "shell": "firebase functions:shell",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^7.0.0",
+    "twilio": "^4.19.0"
+  }
+}
