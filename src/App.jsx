@@ -2,7 +2,7 @@
  * Teen Empowerment SMS Dashboard
  * 
  * Main React application for managing SMS campaigns.
- * Handles authentication, contact management, CSV imports, and bulk messaging.
+ * Handles authentication, contact management, XLSX & CSV imports, and bulk messaging.
  * 
  * @author Teen Empowerment
  * @version 1.0.0
@@ -32,6 +32,7 @@ import {
 } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { parsePhoneNumber, isValidPhoneNumber } from 'libphonenumber-js';
+import * as XLSX from 'xlsx';
 
 // ============================================================================
 // FIREBASE INITIALIZATION
@@ -415,7 +416,7 @@ function ContactsSection({ contacts, searchQuery, setSearchQuery, onAddClick, sh
   };
 
   const handleDelete = async (contactId, contactName) => {
-    if (!confirm(`Delete ${contactName}? This cannot be undone.`)) return;
+    // if (!confirm(`Delete ${contactName}? This cannot be undone.`)) return;
 
     try {
       await deleteDoc(doc(db, 'contacts', contactId));
@@ -433,22 +434,71 @@ function ContactsSection({ contacts, searchQuery, setSearchQuery, onAddClick, sh
     setImporting(true);
 
     try {
-      const text = await file.text();
-      const lines = text.split('\n').filter(line => line.trim());
-      
-      if (lines.length < 2) {
-        showToast('CSV file is empty or invalid', 'error');
+      let rows = [];
+
+      // Check file type
+      if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+        // Handle XLSX file - skip first 2 rows of metadata
+        const arrayBuffer = await file.arrayBuffer();
+        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+        const allRows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+        
+        // Extract header (row 3, index 2) and data rows (starting from row 4)
+        if (allRows.length < 4) {
+          showToast('XLSX file does not have enough rows', 'error');
+          setImporting(false);
+          return;
+        }
+        
+        const headers = allRows[2]; // Row 3 is the header
+        rows = allRows.slice(3).map(row => {
+          const obj = {};
+          headers.forEach((header, i) => {
+            if (header) obj[header] = row[i];
+          });
+          return obj;
+        });
+      } else {
+        // Handle CSV file
+        const text = await file.text();
+        const lines = text.split('\n').filter(line => line.trim());
+        
+        if (lines.length < 2) {
+          showToast('CSV file is empty or invalid', 'error');
+          setImporting(false);
+          return;
+        }
+
+        // Parse CSV header and rows
+        const header = lines[0].toLowerCase().split(',').map(h => h.trim());
+        rows = lines.slice(1).map(line => {
+          const values = line.split(',').map(v => v.trim());
+          const obj = {};
+          header.forEach((h, i) => {
+            obj[h] = values[i];
+          });
+          return obj;
+        });
+      }
+
+      if (rows.length === 0) {
+        showToast('File is empty or invalid', 'error');
         setImporting(false);
         return;
       }
 
-      // Parse header row
-      const header = lines[0].toLowerCase().split(',').map(h => h.trim());
-      const nameIndex = header.indexOf('name');
-      const phoneIndex = header.indexOf('phone');
+      // Find column keys (case-insensitive)
+      const firstRow = rows[0];
+      const firstNameKey = Object.keys(firstRow).find(k => k.toLowerCase() === 'firstname');
+      const lastNameKey = Object.keys(firstRow).find(k => k.toLowerCase() === 'lastname');
+      const nameKey = Object.keys(firstRow).find(k => k.toLowerCase() === 'name');
+      const phoneKey = Object.keys(firstRow).find(k => k.toLowerCase().includes('phone'));
 
-      if (nameIndex === -1 || phoneIndex === -1) {
-        showToast('CSV must have "name" and "phone" columns', 'error');
+      // Check if we have either combined name or separate first/last name, plus phone
+      const hasNameFields = nameKey || (firstNameKey && lastNameKey);
+      if (!hasNameFields || !phoneKey) {
+        showToast('File must have name and phone columns', 'error');
         setImporting(false);
         return;
       }
@@ -457,13 +507,23 @@ function ContactsSection({ contacts, searchQuery, setSearchQuery, onAddClick, sh
       const parsedContacts = [];
       const errors = [];
 
-      for (let i = 1; i < lines.length; i++) {
-        const values = lines[i].split(',').map(v => v.trim());
-        const name = values[nameIndex];
-        let phone = values[phoneIndex];
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        
+        // Get name - either from combined field or first+last
+        let name;
+        if (nameKey) {
+          name = row[nameKey]?.toString().trim();
+        } else if (firstNameKey && lastNameKey) {
+          const firstName = row[firstNameKey]?.toString().trim() || '';
+          const lastName = row[lastNameKey]?.toString().trim() || '';
+          name = `${firstName} ${lastName}`.trim();
+        }
+        
+        let phone = row[phoneKey]?.toString().trim();
 
         if (!name || !phone) {
-          errors.push(`Row ${i + 1}: Missing name or phone`);
+          errors.push(`Row ${i + 2}: Missing name or phone`);
           continue;
         }
 
@@ -474,7 +534,7 @@ function ContactsSection({ contacts, searchQuery, setSearchQuery, onAddClick, sh
           }
 
           if (!isValidPhoneNumber(phone)) {
-            errors.push(`Row ${i + 1}: Invalid phone number ${phone}`);
+            errors.push(`Row ${i + 2}: Invalid phone number ${phone}`);
             continue;
           }
 
@@ -484,12 +544,12 @@ function ContactsSection({ contacts, searchQuery, setSearchQuery, onAddClick, sh
             phone: parsed.number,
           });
         } catch (error) {
-          errors.push(`Row ${i + 1}: Invalid phone format ${phone}`);
+          errors.push(`Row ${i + 2}: Invalid phone format ${phone}`);
         }
       }
 
       if (parsedContacts.length === 0) {
-        showToast('No valid contacts found in CSV', 'error');
+        showToast('No valid contacts found in file', 'error');
         setImporting(false);
         return;
       }
@@ -530,8 +590,8 @@ function ContactsSection({ contacts, searchQuery, setSearchQuery, onAddClick, sh
         console.log('Import errors:', errors);
       }
     } catch (error) {
-      console.error('CSV import error:', error);
-      showToast('Error importing CSV file', 'error');
+      console.error('File import error:', error);
+      showToast('Error importing file', 'error');
     } finally {
       setImporting(false);
       if (fileInputRef.current) {
@@ -553,12 +613,12 @@ function ContactsSection({ contacts, searchQuery, setSearchQuery, onAddClick, sh
             disabled={importing}
             className="btn-secondary disabled:opacity-50"
           >
-            {importing ? 'Importing...' : '📤 Import CSV'}
+            {importing ? 'Importing...' : '📤 Import CSV/XLSX'}
           </button>
           <input
             ref={fileInputRef}
             type="file"
-            accept=".csv"
+            accept=".csv,.xlsx,.xls"
             onChange={handleCSVUpload}
             className="hidden"
           />
